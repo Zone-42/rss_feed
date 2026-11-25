@@ -99,6 +99,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Setup just
+        uses: extractions/setup-just@v3
+
+      - name: Validate justfile
+        run: |
+          just --version
+          just --list --unsorted
+          just --evaluate
+
       - name: Validate start.sh syntax
         run: bash -n start.sh
 

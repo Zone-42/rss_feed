@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-25
+
+### Changed
+- **Task Runner Migration (`Makefile` → `justfile`)**:
+  - Replaced `Makefile` with an idiomatic `justfile` using `bash -euo pipefail`, `dotenv-load`, `[working-directory(...)]`, and grouped recipes (`setup`, `dev`, `quality`, `maintenance`).
+  - Added granular and composite recipes: `install` (`install-backend` using `uv sync --group dev`, `install-frontend`), `dev` (`dev-backend`, `dev-frontend`), `lint` (`lint-backend` covering `ruff` + `mypy app tests`, `lint-frontend`), `test` (`test-backend`, `test-frontend`), `build`, `check` (`lint` + `test` + `build`), and `clean` (safe cache/build cleanup preserving SQLite data).
+  - Updated `README.md` with `just` commands, recipes table, and quick install note (`brew install just`).
+  - Updated GitHub Actions `repo-checks` job in `.github/workflows/ci.yml` to install `just` (`extractions/setup-just@v3`) and validate `justfile` via `just --list --unsorted` and `just --evaluate`.
+
 ## [0.2.0] - 2026-11-25
 
 ### Added

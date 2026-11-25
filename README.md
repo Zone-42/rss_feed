@@ -26,6 +26,7 @@
 ### 环境要求 (Prerequisites)
 - **Python 3.11+** 与 [`uv`](https://docs.astral.sh/uv/)
 - **Node.js 20+** 与 `pnpm`（或 `npm`）
+- **可选：[`just`](https://just.systems)**（推荐任务运行器，macOS 可通过 `brew install just` 安装）
 
 ### 1. 配置环境变量（可选）
 ```bash
@@ -36,25 +37,30 @@ cp .env.example .env
 ### 2. 单命令启动
 ```bash
 ./start.sh
-# 或者使用 Makefile：
-make dev
+# 或者使用 just（macOS：brew install just）：
+just dev
 ```
 启动成功后：
 - **Web 界面**：`http://localhost:5173`
 - **后端 API**：`http://127.0.0.1:8000`（Swagger 文档：`http://127.0.0.1:8000/docs`）
 - 按 `Ctrl+C` 可同时优雅关闭前后端服务。
 
-### 常用 Make 命令 (Makefile Targets)
+### 常用 Just 命令 (`justfile` Recipes)
+
+如尚未安装 [`just`](https://just.systems)，可在 macOS 上执行 `brew install just`（其他平台参见[官方安装指南](https://just.systems/man/en/packages.html)）；直接运行 `just` 可列出全部任务分组与说明。
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `make install` | 安装后端（`uv sync`）与前端（`pnpm`/`npm install`）全部依赖 |
-| `make dev` | 调用 `./start.sh` 一键启动本地开发环境 |
-| `make test` | 运行后端 `pytest` 与前端 `vitest` 单元测试 |
-| `make lint` | 运行后端 `ruff` + `mypy` 与前端 `eslint` + `tsc --noEmit` |
-| `make build` | 构建生产前端静态包至 `frontend/dist` |
+| `just` | 列出所有可用任务分组及说明（`just --list --unsorted`） |
+| `just install` | 安装后端（`uv sync --group dev`）与前端（`pnpm`/`npm install`）全部依赖 |
+| `just dev` | 调用 `./start.sh` 一键启动本地开发环境（也可单独运行 `just dev-backend` / `just dev-frontend`） |
+| `just lint` | 运行后端 `ruff` + `mypy app tests` 与前端 `eslint` + `tsc --noEmit` |
+| `just test` | 运行后端 `pytest` 与前端 `vitest` 单元测试 |
+| `just build` | 构建生产前端静态包至 `frontend/dist` |
+| `just check` | 一键运行完整质量门禁（`lint` + `test` + `build`） |
+| `just clean` | 清理构建产物与工具缓存目录（保留本地 SQLite 数据库） |
 
-> **持续集成 (CI)**：仓库已配置 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在推送或 PR 至 `main` 时自动运行后端（`ruff`、`mypy`、`pytest`）、前端（`eslint`、`tsc`、`vitest`、`vite build`）以及脚本/YAML 校验。
+> **持续集成 (CI)**：仓库已配置 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在推送或 PR 至 `main` 时自动运行后端（`ruff`、`mypy`、`pytest`）、前端（`eslint`、`tsc`、`vitest`、`vite build`）以及 `justfile` / 脚本 / YAML 校验。
 
 ---
 
@@ -163,9 +169,9 @@ rss_feed/
 │   └── docker-compose.yml    # Phase 2 VPS 生产部署模板
 ├── .env.example              # 环境变量示例（无真实密钥）
 ├── .gitignore                # Git 忽略规则
-├── Makefile                  # install / dev / build / test / lint
+├── justfile                  # install / dev / lint / test / build / check / clean
 ├── start.sh                  # 一键启动前后端脚本
-├── VERSION                   # 语义化版本号 (0.2.0)
+├── VERSION                   # 语义化版本号 (0.3.0)
 ├── CHANGELOG.md              # 变更日志
 └── README.md                 # 项目说明文档
 ```
