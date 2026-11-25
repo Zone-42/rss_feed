@@ -31,7 +31,7 @@ def test_health_endpoint_reflects_ai_and_nlm_config(
     body = resp.json()
     assert body == {
         "status": "ok",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "ai_configured": False,
         "nlm_available": False,
     }

@@ -54,6 +54,8 @@ make dev
 | `make lint` | 运行后端 `ruff` + `mypy` 与前端 `eslint` + `tsc --noEmit` |
 | `make build` | 构建生产前端静态包至 `frontend/dist` |
 
+> **持续集成 (CI)**：仓库已配置 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)，在推送或 PR 至 `main` 时自动运行后端（`ruff`、`mypy`、`pytest`）、前端（`eslint`、`tsc`、`vitest`、`vite build`）以及脚本/YAML 校验。
+
 ---
 
 ## 预置精选订阅源 (Pre-Configured 2026 Starter Feeds)
@@ -152,6 +154,9 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
 
 ```text
 rss_feed/
+├── .github/
+│   └── workflows/
+│       └── ci.yml            # GitHub Actions 前后端 CI 流水线
 ├── backend/                  # FastAPI + SQLite 后端 (uv 管理)
 ├── frontend/                 # React + TypeScript + Tailwind 前端 (Vite)
 ├── deploy/
@@ -160,7 +165,7 @@ rss_feed/
 ├── .gitignore                # Git 忽略规则
 ├── Makefile                  # install / dev / build / test / lint
 ├── start.sh                  # 一键启动前后端脚本
-├── VERSION                   # 语义化版本号 (0.1.0)
+├── VERSION                   # 语义化版本号 (0.2.0)
 ├── CHANGELOG.md              # 变更日志
 └── README.md                 # 项目说明文档
 ```

@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Python 3.11 / uv)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "backend/uv.lock"
+
+      - name: Install Python
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Lint with ruff
+        run: uv run ruff check .
+
+      - name: Type-check with mypy
+        run: uv run mypy app tests
+
+      - name: Run unit tests
+        run: uv run pytest -v
+
+  frontend:
+    name: Frontend (Node 22 / pnpm)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint with ESLint
+        run: pnpm run lint
+
+      - name: Type-check with TypeScript
+        run: pnpm run typecheck
+
+      - name: Run unit tests
+        run: pnpm run test
+
+      - name: Build production bundle
+        run: pnpm run build
+
+      - name: Upload frontend dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  repo-checks:
+    name: Repository Checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate start.sh syntax
+        run: bash -n start.sh
+
+      - name: Validate YAML files
+        run: |
+          ruby -ryaml -e '
+            %w[deploy/docker-compose.yml .github/workflows/ci.yml].each do |file|
+              YAML.load_file(file)
+              puts "YAML OK: #{file}"
+            end
+          '

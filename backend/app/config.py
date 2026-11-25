@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent
 DEFAULT_DB_PATH = str(BACKEND_DIR / "data" / "rss_reader.db")

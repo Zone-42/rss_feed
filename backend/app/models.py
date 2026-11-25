@@ -13,7 +13,7 @@ MatchField = Literal["both", "title", "content"]
 
 class HealthResponse(BaseModel):
     status: str = "ok"
-    version: str = "0.1.0"
+    version: str = "0.2.0"
     ai_configured: bool
     nlm_available: bool
 
