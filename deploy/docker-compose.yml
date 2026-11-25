@@ -1,0 +1,181 @@
+# =============================================================================
+# Phase 2 VPS Production Stack — Personal Multi-Source RSS Architecture
+# =============================================================================
+# Stack overview:
+#   - PostgreSQL 16 + pgvector : Durable relational + vector-ready database
+#   - Miniflux                 : High-performance Go RSS engine + media proxy
+#   - ReactFlux                : Modern Folo-like responsive web UI for Miniflux
+#   - RSSHub + Redis 8         : Social media & web-to-RSS bridge (X, Zhihu, XHS)
+#   - Browserless Chromium     : Isolated headless browser with strict RAM caps
+#   - Cloudflare Tunnel        : Zero-Trust HTTPS ingress (no open public ports)
+#
+# Quick start on a 2 vCPU / 4 GB RAM VPS:
+#   1. Create `deploy/.env` (copy Phase 2 variables from root `.env.example`)
+#   2. Fill in strong random values for all required secrets (NEVER commit `.env`)
+#   3. Run: docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+# =============================================================================
+
+name: rss-reader-prod
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 with pgvector extension (ready for future semantic search)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-miniflux}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-miniflux}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-miniflux} -d ${POSTGRES_DB:-miniflux}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    mem_limit: 512m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # Miniflux: Core RSS/Atom fetcher, full-text scraper & anti-hotlink media proxy
+  # ---------------------------------------------------------------------------
+  miniflux:
+    image: miniflux/miniflux:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # Bound to loopback only; expose externally via Cloudflare Tunnel
+      - "127.0.0.1:8080:8080"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-miniflux}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env}@postgres:5432/${POSTGRES_DB:-miniflux}?sslmode=disable
+      RUN_MIGRATIONS: "1"
+      CREATE_ADMIN: "1"
+      ADMIN_USERNAME: ${MINIFLUX_ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${MINIFLUX_ADMIN_PASSWORD:?Set MINIFLUX_ADMIN_PASSWORD in deploy/.env}
+      BASE_URL: ${MINIFLUX_BASE_URL:-http://localhost:8080}
+      # Allow Miniflux to poll internal Docker service `http://rsshub:1200`
+      FETCHER_ALLOW_PRIVATE_NETWORKS: "1"
+      # Proxy all external media to bypass hotlink / Referer blocks (WeChat, Zhihu, XHS, X)
+      MEDIA_PROXY_MODE: all
+      MEDIA_PROXY_PRIVATE_KEY: ${MINIFLUX_MEDIA_PROXY_PRIVATE_KEY:-}
+      POLLING_FREQUENCY: ${MINIFLUX_POLLING_FREQUENCY:-60}
+      BATCH_SIZE: ${MINIFLUX_BATCH_SIZE:-100}
+      CLEANUP_ARCHIVE_READ_DAYS: ${MINIFLUX_CLEANUP_ARCHIVE_READ_DAYS:-60}
+    healthcheck:
+      test: ["CMD", "/usr/bin/miniflux", "-healthcheck", "auto"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    mem_limit: 256m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # ReactFlux: Clean, modern web frontend for Miniflux
+  # ---------------------------------------------------------------------------
+  reactflux:
+    image: electh/reactflux:latest
+    restart: unless-stopped
+    depends_on:
+      miniflux:
+        condition: service_healthy
+    ports:
+      # Bound to loopback only; route via Cloudflare Tunnel -> http://reactflux:2000
+      - "127.0.0.1:2000:2000"
+    mem_limit: 128m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # Redis 8: Caching layer for RSSHub to minimize upstream rate-limiting
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    mem_limit: 192m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # Browserless Chromium: Isolated headless browser with explicit memory limits
+  # Prevents Chromium tabs from OOM-killing a small VPS
+  # ---------------------------------------------------------------------------
+  browserless:
+    image: ghcr.io/browserless/chromium:latest
+    restart: unless-stopped
+    environment:
+      CONCURRENT: ${BROWSERLESS_CONCURRENT:-2}
+      QUEUED: ${BROWSERLESS_QUEUED:-5}
+      TIMEOUT: ${BROWSERLESS_TIMEOUT:-30000}
+      TOKEN: ${BROWSERLESS_TOKEN:?Set BROWSERLESS_TOKEN in deploy/.env}
+    shm_size: 512m
+    mem_limit: 1024m
+    memswap_limit: 1536m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # RSSHub: Generates RSS feeds for X/Twitter, Zhihu, Xiaohongshu, and more
+  # ---------------------------------------------------------------------------
+  rsshub:
+    image: diygod/rsshub:latest
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      browserless:
+        condition: service_started
+    ports:
+      # Loopback only; Miniflux accesses via http://rsshub:1200 on rss_internal
+      - "127.0.0.1:1200:1200"
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: redis
+      REDIS_URL: redis://redis:6379/
+      PUPPETEER_WS_ENDPOINT: ws://browserless:3000?token=${BROWSERLESS_TOKEN:?Set BROWSERLESS_TOKEN in deploy/.env}
+      ACCESS_KEY: ${RSSHUB_ACCESS_KEY:-}
+      CACHE_EXPIRE: ${RSSHUB_CACHE_EXPIRE:-600}
+      # Optional social route credentials (configure in deploy/.env only if needed):
+      # TWITTER_AUTH_TOKEN: ${TWITTER_AUTH_TOKEN:-}
+      # ZHIHU_COOKIES: ${ZHIHU_COOKIES:-}
+      # XIAOHONGSHU_COOKIES: ${XIAOHONGSHU_COOKIES:-}
+    mem_limit: 512m
+    networks:
+      - rss_internal
+
+  # ---------------------------------------------------------------------------
+  # Cloudflare Tunnel: Zero-Trust ingress without exposing VPS ports 80/443
+  # Configure public hostnames in Cloudflare Zero Trust Dashboard:
+  #   - rss-api.yourdomain.com -> http://miniflux:8080
+  #   - rss.yourdomain.com     -> http://reactflux:2000
+  # ---------------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    depends_on:
+      miniflux:
+        condition: service_healthy
+      reactflux:
+        condition: service_started
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in deploy/.env}
+    mem_limit: 128m
+    networks:
+      - rss_internal
+
+volumes:
+  postgres_data:
+
+networks:
+  rss_internal:
+    driver: bridge

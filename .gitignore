@@ -1,0 +1,60 @@
+# Python & uv
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# SQLite databases & local runtime data
+backend/data/*.db
+backend/data/*.db-*
+backend/data/*.sqlite
+backend/data/*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Node & Frontend
+node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/coverage/
+.vite/
+*.tsbuildinfo
+
+# Environment files & secrets
+.env
+.env.local
+.env.*.local
+deploy/.env
+deploy/.env.*
+!.env.example
+
+# Logs & temporary files
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tmp
+tmp/
+
+# macOS & Editors
+.DS_Store
+._*
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

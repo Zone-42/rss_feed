@@ -1,0 +1,227 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Segoe UI', Roboto, sans-serif;
+    --font-serif: 'Newsreader', 'Georgia', 'Songti SC', 'Noto Serif SC', serif;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    font-family: var(--font-sans);
+  }
+
+  /* Subtle custom scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(113, 113, 122, 0.25);
+    border-radius: 9999px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(113, 113, 122, 0.45);
+  }
+}
+
+/* Editorial prose styling for sanitized Reader Pane HTML */
+.reader-prose {
+  font-size: 16px;
+  line-height: 1.78;
+  color: #27272a;
+  word-break: break-word;
+}
+
+.dark .reader-prose {
+  color: #e4e4e7;
+}
+
+.reader-prose h1,
+.reader-prose h2,
+.reader-prose h3,
+.reader-prose h4 {
+  font-weight: 700;
+  line-height: 1.35;
+  margin-top: 1.5em;
+  margin-bottom: 0.6em;
+  color: #18181b;
+}
+
+.dark .reader-prose h1,
+.dark .reader-prose h2,
+.dark .reader-prose h3,
+.dark .reader-prose h4 {
+  color: #f4f4f5;
+}
+
+.reader-prose h1 {
+  font-size: 1.5rem;
+}
+
+.reader-prose h2 {
+  font-size: 1.25rem;
+}
+
+.reader-prose h3 {
+  font-size: 1.1rem;
+}
+
+.reader-prose p {
+  margin-top: 0;
+  margin-bottom: 1.1em;
+}
+
+.reader-prose a {
+  color: #ea580c;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.dark .reader-prose a {
+  color: #fb923c;
+}
+
+.reader-prose a.timestamp-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.45rem;
+  margin: 0 0.1rem;
+  border-radius: 0.375rem;
+  background-color: rgba(139, 92, 246, 0.12);
+  color: #7c3aed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85em;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+
+.reader-prose a.timestamp-link:hover {
+  background-color: rgba(139, 92, 246, 0.24);
+}
+
+.dark .reader-prose a.timestamp-link {
+  background-color: rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+}
+
+.dark .reader-prose a.timestamp-link:hover {
+  background-color: rgba(167, 139, 250, 0.32);
+}
+
+.reader-prose blockquote {
+  margin: 1.25em 0;
+  padding: 0.25em 0 0.25em 1em;
+  border-left: 3px solid #f97316;
+  color: #52525b;
+  font-style: italic;
+}
+
+.dark .reader-prose blockquote {
+  color: #a1a1aa;
+}
+
+.reader-prose ul,
+.reader-prose ol {
+  margin: 0.9em 0 1.1em 1.4em;
+}
+
+.reader-prose ul {
+  list-style-type: disc;
+}
+
+.reader-prose ol {
+  list-style-type: decimal;
+}
+
+.reader-prose li {
+  margin-bottom: 0.35em;
+}
+
+.reader-prose pre {
+  margin: 1.1em 0;
+  padding: 0.9rem 1rem;
+  border-radius: 0.625rem;
+  background-color: #f4f4f5;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.dark .reader-prose pre {
+  background-color: #181b23;
+}
+
+.reader-prose code {
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.25rem;
+  background-color: #f4f4f5;
+  font-size: 0.88em;
+}
+
+.dark .reader-prose code {
+  background-color: #1e222b;
+}
+
+.reader-prose pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.reader-prose img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.75rem;
+  margin: 1.25em 0;
+}
+
+.reader-prose figure {
+  margin: 1.25em 0;
+}
+
+.reader-prose figcaption {
+  font-size: 0.82rem;
+  color: #71717a;
+  margin-top: 0.4rem;
+}
+
+.reader-prose hr {
+  border: 0;
+  border-top: 1px solid #e4e4e7;
+  margin: 1.75em 0;
+}
+
+.dark .reader-prose hr {
+  border-top-color: #272b36;
+}
+
+.reader-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.25em 0;
+  font-size: 0.9rem;
+}
+
+.reader-prose th,
+.reader-prose td {
+  border: 1px solid #e4e4e7;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+.dark .reader-prose th,
+.dark .reader-prose td {
+  border-color: #272b36;
+}
