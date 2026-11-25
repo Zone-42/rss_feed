@@ -110,6 +110,11 @@ export function Sidebar({
     return counts;
   }, [feeds]);
 
+  const errorFeedCount = useMemo(
+    () => feeds.filter((feed) => Boolean(feed.last_error?.trim())).length,
+    [feeds],
+  );
+
   const groupedFeeds = useMemo(() => {
     const map = new Map<ViewType, Feed[]>();
     for (const vt of VIEW_GROUP_ORDER) {
@@ -262,6 +267,16 @@ export function Sidebar({
             <span className="text-[11px] font-semibold tracking-wider text-zinc-400 uppercase dark:text-zinc-500">
               订阅源 ({feeds.length})
             </span>
+            {errorFeedCount > 0 && (
+              <span
+                data-testid="sidebar-error-count-badge"
+                title={`${errorFeedCount} 个订阅源最近抓取失败`}
+                className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 dark:bg-rose-950/70 dark:text-rose-300"
+              >
+                <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                <span>{errorFeedCount} 异常</span>
+              </span>
+            )}
           </div>
 
           {groupedFeeds.length === 0 ? (
@@ -325,14 +340,20 @@ export function Sidebar({
                                   </span>
                                 </button>
 
-                                {feed.last_error && (
-                                  <span
-                                    title={`抓取异常: ${feed.last_error}`}
-                                    className="shrink-0 text-amber-500"
-                                    aria-label={`订阅源错误: ${feed.last_error}`}
+                                {feed.last_error?.trim() && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onSelectFeed(feed);
+                                      onCloseMobile();
+                                    }}
+                                    title={`查看抓取异常: ${feed.last_error}`}
+                                    className="shrink-0 rounded p-0.5 text-rose-500 transition hover:bg-rose-100 hover:text-rose-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/40 dark:text-amber-400 dark:hover:bg-rose-950/60 dark:hover:text-rose-300"
+                                    aria-label={`查看 ${feed.title} 抓取异常: ${feed.last_error}`}
                                   >
                                     <AlertTriangle className="h-3.5 w-3.5" />
-                                  </span>
+                                  </button>
                                 )}
 
                                 {/* Per-feed actions on hover or confirm */}

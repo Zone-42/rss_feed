@@ -64,6 +64,28 @@ just dev
 
 ---
 
+## 代理配置说明（Surge / Sing-box / Clash / SOCKS5）
+
+后端基于 `httpx[socks]`（`socksio`）统一管理所有外部网络请求，在常见桌面代理环境下**开箱即用**：
+
+- **开箱自动适配**：当 `.env` 中未设置 `RSS_PROXY_URL` 时，后端会自动遵循 Shell 环境变量（`ALL_PROXY`、`HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY`）以及 **macOS 系统代理**，原生支持 `http://`、`https://`、`socks5://` 与 `socks5h://` 代理。
+- **手动覆盖或直连 (`RSS_PROXY_URL`)**：如需为阅读器单独指定代理或绕过系统代理，可在 `.env` 中配置：
+  ```bash
+  # 示例：显式走 Surge / Sing-box / Clash 的 SOCKS5 或 HTTP 代理
+  RSS_PROXY_URL=socks5://127.0.0.1:6153
+  # RSS_PROXY_URL=http://127.0.0.1:6152
+
+  # 示例：强制直连（忽略系统代理与 Shell 代理变量，同时保留 SSL_CERT_FILE）
+  # RSS_PROXY_URL=direct
+  ```
+  > 无论如何配置 `RSS_PROXY_URL`，访问 `localhost`、`127.0.0.1`、`[::1]` 的请求都会自动绕过代理，确保本地 RSSHub、Ollama 等服务不受影响。
+- **Fake-IP DNS 兼容与 SSRF 防护 (`RSS_ALLOW_FAKE_IP_DNS`)**：
+  - Surge / Sing-box / Clash 开启增强模式或 TUN 模式时，公网域名可能被本地解析为 `198.18.0.0/15` Fake-IP 地址。
+  - 默认值 `RSS_ALLOW_FAKE_IP_DNS=auto` 仅在检测到活跃代理、且目标为合法公网域名与标准 HTTP(S) 端口时放行 Fake-IP 解析结果；任何直连 IP、混淆 IPv4、私网/回环/链路本地地址及 DNS Rebinding 域名仍会被严格拦截（HTTP 403）。
+  - 可选值：`auto`（默认，推荐本地桌面使用）、`always`（强制兼容 Fake-IP 域名解析）、`never`（**云端 / VPS 部署强烈推荐设为 `never`**，完全禁用 Fake-IP 例外）。
+
+---
+
 ## 预置精选订阅源 (Pre-Configured 2026 Starter Feeds)
 
 首次启动数据库为空时，系统会自动导入以下经验证的 2026 高信噪比订阅源（也可在 **Add Feed → OPML / Starter Pack** 中随时重新导入，幂等安全）：
@@ -171,7 +193,7 @@ rss_feed/
 ├── .gitignore                # Git 忽略规则
 ├── justfile                  # install / dev / lint / test / build / check / clean
 ├── start.sh                  # 一键启动前后端脚本
-├── VERSION                   # 语义化版本号 (0.3.0)
+├── VERSION                   # 语义化版本号 (0.3.1)
 ├── CHANGELOG.md              # 变更日志
 └── README.md                 # 项目说明文档
 ```

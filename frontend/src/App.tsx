@@ -3,6 +3,7 @@ import { apiClient } from './api/client';
 import { AddFeedModal, type AddFeedTab } from './components/AddFeedModal';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { EntryList } from './components/EntryList';
+import { FeedErrorBanner } from './components/FeedErrorBanner';
 import { FiltersExportModal } from './components/FiltersExportModal';
 import { ReaderPane } from './components/ReaderPane';
 import { Sidebar } from './components/Sidebar';
@@ -61,9 +62,10 @@ export default function App() {
   const notify = useCallback((type: ToastMessage['type'], text: string) => {
     const id = toastIdRef.current++;
     setToasts((prev) => [...prev.slice(-3), { id, type, text }]);
+    const duration = type === 'error' || type === 'warning' ? 9000 : 4000;
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 4000);
+    }, duration);
   }, []);
 
   const dismissToast = useCallback((id: number) => {
@@ -171,6 +173,20 @@ export default function App() {
     [feeds, selectedFeedId],
   );
 
+  const scopedFailingFeeds = useMemo(() => {
+    if (selectedFeed) {
+      return selectedFeed.last_error?.trim() ? [selectedFeed] : [];
+    }
+    if (activeView === 'starred') {
+      return [];
+    }
+    return feeds.filter(
+      (feed) =>
+        Boolean(feed.last_error?.trim()) &&
+        (activeView === 'all' || feed.view_type === activeView),
+    );
+  }, [feeds, activeView, selectedFeed]);
+
   const adjustFeedUnread = useCallback((feedId: number, delta: number) => {
     setFeeds((prev) =>
       prev.map((f) =>
@@ -268,12 +284,22 @@ export default function App() {
     setIsRefreshingAll(true);
     try {
       const res = await apiClient.refreshAllFeeds();
-      const errNote = res.errors.length > 0 ? `，${res.errors.length} 个源异常` : '';
-      const filteredNote = res.total_filtered > 0 ? `，拦截 ${res.total_filtered} 条噪声` : '';
-      notify(
-        'success',
-        `刷新 ${res.feeds_refreshed} 个源：新增 ${res.total_added} 条${filteredNote}${errNote}`,
-      );
+      const firstErr =
+        res.errors.find((item) => item.error?.trim())?.error.trim() || '未知错误';
+      if (res.feeds_refreshed > 0 && res.errors.length >= res.feeds_refreshed) {
+        notify('error', `全部 ${res.errors.length} 个订阅源抓取失败：${firstErr}`);
+      } else if (res.errors.length > 0) {
+        notify(
+          'warning',
+          `刷新完成：新增 ${res.total_added} 条，${res.errors.length} 个源异常（${firstErr}）`,
+        );
+      } else {
+        const filteredNote = res.total_filtered > 0 ? `，拦截 ${res.total_filtered} 条噪声` : '';
+        notify(
+          'success',
+          `刷新 ${res.feeds_refreshed} 个源：新增 ${res.total_added} 条${filteredNote}`,
+        );
+      }
       await Promise.all([loadHealthAndFeeds(), loadEntries(0, false)]);
     } catch (err) {
       notify('error', err instanceof Error ? err.message : '全部刷新失败');
@@ -471,6 +497,20 @@ export default function App() {
             onOpenMobileMenu={() => setMobileMenuOpen(true)}
           />
 
+          <FeedErrorBanner
+            activeView={activeView}
+            selectedFeed={selectedFeed}
+            failingFeeds={scopedFailingFeeds}
+            entriesCount={entries.length}
+            isLoadingEntries={isLoadingEntries}
+            isRefreshingAll={isRefreshingAll}
+            refreshingFeedIds={refreshingFeedIds}
+            onRetryAll={() => void handleRefreshAll()}
+            onRetryFeed={(id) => void handleRefreshFeed(id)}
+            onSelectFeed={handleSelectFeed}
+            onNotify={notify}
+          />
+
           <EntryList
             entries={entries}
             total={totalEntries}
@@ -481,6 +521,10 @@ export default function App() {
             currentAudioTrackId={audioPlayer.currentTrack?.id ?? null}
             isAudioPlaying={audioPlayer.isPlaying}
             isSplitOpen={selectedEntry !== null}
+            errorFeedCount={scopedFailingFeeds.length}
+            isRetryingRefresh={
+              selectedFeed ? refreshingFeedIds.has(selectedFeed.id) : isRefreshingAll
+            }
             onSelectEntry={(entry) => void handleSelectEntry(entry)}
             onToggleStar={(entry) => void handleToggleStar(entry)}
             onPlayPodcast={(entry) => audioPlayer.playTrack(entry)}
@@ -488,6 +532,13 @@ export default function App() {
             onOpenSocialQuickAdd={() => {
               setAddFeedTab('social');
               setAddFeedOpen(true);
+            }}
+            onRetryRefresh={() => {
+              if (selectedFeed) {
+                void handleRefreshFeed(selectedFeed.id);
+              } else {
+                void handleRefreshAll();
+              }
             }}
           />
         </main>

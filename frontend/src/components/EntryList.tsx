@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   ArrowUp,
   Headphones,
   Loader2,
@@ -6,6 +7,7 @@ import {
   Pause,
   Play,
   Plus,
+  RefreshCw,
   Sparkles,
   Star,
   Tv,
@@ -25,11 +27,14 @@ interface EntryListProps {
   currentAudioTrackId: number | null;
   isAudioPlaying: boolean;
   isSplitOpen: boolean;
+  errorFeedCount?: number;
+  isRetryingRefresh?: boolean;
   onSelectEntry: (entry: Entry) => void;
   onToggleStar: (entry: Entry) => void;
   onPlayPodcast: (entry: Entry) => void;
   onLoadMore: () => void;
   onOpenSocialQuickAdd: () => void;
+  onRetryRefresh?: () => void;
 }
 
 function stripHtmlPreview(htmlOrText: string | null | undefined): string {
@@ -59,11 +64,14 @@ export function EntryList({
   currentAudioTrackId,
   isAudioPlaying,
   isSplitOpen,
+  errorFeedCount = 0,
+  isRetryingRefresh = false,
   onSelectEntry,
   onToggleStar,
   onPlayPodcast,
   onLoadMore,
   onOpenSocialQuickAdd,
+  onRetryRefresh,
 }: EntryListProps) {
   const isVideoGrid = activeView === 'video';
   const isSocialFeed = activeView === 'social';
@@ -106,16 +114,44 @@ export function EntryList({
       )}
 
       {entries.length === 0 ? (
-        <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
-          <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-            {isSocialFeed ? '还没有社媒订阅内容' : '当前视图暂无条目'}
-          </p>
-          <p className="mt-1.5 max-w-xs text-xs text-zinc-500 dark:text-zinc-400">
-            {isSocialFeed
-              ? '点击上方「配置社媒源」快速生成 X / 知乎 / 小红书 RSSHub 订阅路由。'
-              : '尝试点击左侧「全部刷新」，或调整筛选 / 搜索条件。'}
-          </p>
-        </div>
+        errorFeedCount > 0 ? (
+          <div
+            data-testid="entry-list-error-empty"
+            className="flex flex-col items-center justify-center px-6 py-14 text-center"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-950/50 dark:text-rose-400">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <p className="mt-3 max-w-sm text-sm font-medium text-zinc-800 dark:text-zinc-200">
+              未能获取到内容：当前视图有 {errorFeedCount} 个订阅源抓取异常
+            </p>
+            <p className="mt-1.5 max-w-sm text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+              请查看上方错误原因或检查网络/代理设置，修复后点击下方按钮重新抓取。
+            </p>
+            {onRetryRefresh && (
+              <button
+                type="button"
+                onClick={onRetryRefresh}
+                disabled={isRetryingRefresh}
+                className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-rose-600 px-3.5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-rose-700 disabled:opacity-60"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', isRetryingRefresh && 'animate-spin')} />
+                <span>{isRetryingRefresh ? '正在刷新...' : '重试刷新'}</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
+            <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              {isSocialFeed ? '还没有社媒订阅内容' : '当前视图暂无条目'}
+            </p>
+            <p className="mt-1.5 max-w-xs text-xs text-zinc-500 dark:text-zinc-400">
+              {isSocialFeed
+                ? '点击上方「配置社媒源」快速生成 X / 知乎 / 小红书 RSSHub 订阅路由。'
+                : '尝试点击左侧「全部刷新」，或调整筛选 / 搜索条件。'}
+            </p>
+          </div>
+        )
       ) : isVideoGrid ? (
         /* 16:9 YouTube Video Card Grid */
         <div

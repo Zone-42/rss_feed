@@ -39,6 +39,7 @@ from app.fetchers import (
     refresh_feed,
     resolve_youtube_feed_url,
 )
+from app.http_client import create_async_client
 from app.models import (
     EntryListResponse,
     EntryOut,
@@ -74,14 +75,25 @@ logger = logging.getLogger(__name__)
 
 async def _refresh_all_feeds_concurrently(db: Database) -> RefreshAllResponse:
     feeds = db.list_feeds(enabled_only=True)
+    if not feeds:
+        return RefreshAllResponse(
+            feeds_refreshed=0,
+            total_added=0,
+            total_filtered=0,
+            errors=[],
+        )
+
     sem = asyncio.Semaphore(6)
 
-    async def _run_one(feed: FeedOut) -> tuple[int, int, int, str | None]:
-        async with sem:
-            added, filtered, err = await refresh_feed(db, feed)
-            return feed.id, added, filtered, err
+    async with create_async_client(follow_redirects=True) as http_client:
 
-    results = await asyncio.gather(*(_run_one(feed) for feed in feeds))
+        async def _run_one(feed: FeedOut) -> tuple[int, int, int, str | None]:
+            async with sem:
+                added, filtered, err = await refresh_feed(db, feed, client=http_client)
+                return feed.id, added, filtered, err
+
+        results = await asyncio.gather(*(_run_one(feed) for feed in feeds))
+
     total_added = 0
     total_filtered = 0
     errors: list[FeedRefreshError] = []

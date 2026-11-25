@@ -18,6 +18,7 @@ import httpx
 from app.config import Settings
 from app.db import Database, utc_now_iso
 from app.fetchers import is_youtube_url, sanitize_http_url, strip_html
+from app.http_client import AI_HTTP_TIMEOUT, managed_async_client
 from app.models import (
     EntryOut,
     ExportMarkdownRequest,
@@ -83,30 +84,31 @@ async def _call_gemini(
     *,
     api_key: str,
     model: str,
+    settings: Settings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> str:
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    owns_client = client is None
-    http_client = httpx.AsyncClient(timeout=45.0) if client is None else client
-    try:
-        response = await http_client.post(
-            endpoint,
-            headers={
-                "Content-Type": "application/json",
-                "x-goog-api-key": api_key,
-            },
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"temperature": 0.2},
-            },
-        )
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
-    except httpx.HTTPError as exc:
-        raise AIProviderError(f"Gemini API request failed: {exc}") from exc
-    finally:
-        if owns_client:
-            await http_client.aclose()
+    async with managed_async_client(
+        client,
+        timeout=AI_HTTP_TIMEOUT,
+        settings=settings,
+    ) as http_client:
+        try:
+            response = await http_client.post(
+                endpoint,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": api_key,
+                },
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0.2},
+                },
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+        except httpx.HTTPError as exc:
+            raise AIProviderError(f"Gemini API request failed: {exc}") from exc
 
     candidates = data.get("candidates") or []
     if candidates:
@@ -124,37 +126,38 @@ async def _call_openai_compatible(
     api_key: str,
     base_url: str,
     model: str,
+    settings: Settings | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> str:
     endpoint = f"{base_url.rstrip('/')}/chat/completions"
-    owns_client = client is None
-    http_client = httpx.AsyncClient(timeout=45.0) if client is None else client
-    try:
-        response = await http_client.post(
-            endpoint,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            json={
-                "model": model,
-                "temperature": 0.2,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You produce concise, high-signal Markdown summaries.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            },
-        )
-        response.raise_for_status()
-        data: dict[str, Any] = response.json()
-    except httpx.HTTPError as exc:
-        raise AIProviderError(f"OpenAI-compatible API request failed: {exc}") from exc
-    finally:
-        if owns_client:
-            await http_client.aclose()
+    async with managed_async_client(
+        client,
+        timeout=AI_HTTP_TIMEOUT,
+        settings=settings,
+    ) as http_client:
+        try:
+            response = await http_client.post(
+                endpoint,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                json={
+                    "model": model,
+                    "temperature": 0.2,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You produce concise, high-signal Markdown summaries.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            data: dict[str, Any] = response.json()
+        except httpx.HTTPError as exc:
+            raise AIProviderError(f"OpenAI-compatible API request failed: {exc}") from exc
 
     choices = data.get("choices") or []
     if choices:
@@ -199,6 +202,7 @@ async def summarize_entry(
             prompt,
             api_key=gemini_key,
             model=model,
+            settings=settings,
             client=client,
         )
     else:
@@ -208,6 +212,7 @@ async def summarize_entry(
             api_key=openai_key,
             base_url=settings.openai_base_url,
             model=model,
+            settings=settings,
             client=client,
         )
 

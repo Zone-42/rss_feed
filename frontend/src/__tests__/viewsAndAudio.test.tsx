@@ -175,7 +175,7 @@ describe('Multi-view rendering, sanitization, and persistent audio player', () =
   beforeEach(() => {
     vi.spyOn(apiClient, 'getHealth').mockResolvedValue({
       status: 'ok',
-      version: '0.3.0',
+      version: '0.3.1',
       ai_configured: true,
       nlm_available: false,
     });

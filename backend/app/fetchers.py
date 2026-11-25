@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 import socket
+import time
 from calendar import timegm
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,7 +18,17 @@ import feedparser
 import httpx
 import trafilatura
 
+from app.config import FakeIPPolicy, Settings, get_settings
 from app.db import Database, utc_now_iso
+from app.http_client import (
+    API_USER_AGENT,
+    BROWSER_USER_AGENT,
+    FALLBACK_FEED_USER_AGENT,
+    FEED_HEADERS,
+    HTML_HEADERS,
+    has_active_proxy_for_url,
+    managed_async_client,
+)
 from app.models import (
     EntryOut,
     FeedOut,
@@ -26,15 +37,8 @@ from app.models import (
     PodcastSearchResult,
 )
 
-USER_AGENT = "PersonalRSSReader/0.1 (+https://localhost)"
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-)
-
 MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
 MAX_REDIRECTS = 5
-HTTP_TIMEOUT = 20.0
 
 TRACKING_EXACT_PARAMS = frozenset(
     {
@@ -68,8 +72,43 @@ BLOCKED_HOSTNAMES = frozenset(
         "metadata",
         "metadata.google.internal",
         "metadata.goog",
+        "instance-data",
+        "host.docker.internal",
+        "gateway.docker.internal",
     }
 )
+
+BLOCKED_HOSTNAME_SUFFIXES = (
+    ".localhost",
+    ".local",
+    ".internal",
+    ".localdomain",
+    ".home.arpa",
+    ".lan",
+    ".home",
+    ".corp",
+    ".intranet",
+    ".private",
+    ".arpa",
+)
+
+BLOCKED_REBINDING_DOMAINS = (
+    "nip.io",
+    "sslip.io",
+    "xip.io",
+    "traefik.me",
+    "rbndr.us",
+    "localtest.me",
+    "lvh.me",
+    "vcap.me",
+)
+
+_FAKE_IP_V4_NET = ipaddress.ip_network("198.18.0.0/15")
+_FAKE_IP_V6_NET = ipaddress.ip_network("fc00::/18")
+_FAKE_IP_CANARY_DOMAINS = ("example.com", "cloudflare.com")
+_FAKE_IP_CANARY_TTL_SECONDS = 60.0
+_fake_ip_canary_cache: tuple[float, bool] | None = None
+_local_dns_canary_cache: tuple[float, bool] | None = None
 
 AUDIO_EXTENSIONS = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".flac")
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")
@@ -235,6 +274,141 @@ def _is_ip_blocked(ip_str: str) -> bool:
     )
 
 
+def _is_fake_ip_v4(ip_str: str) -> bool:
+    """Return True if ``ip_str`` is a native IPv4 address in RFC 2544 Fake-IP range."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return isinstance(ip, ipaddress.IPv4Address) and ip in _FAKE_IP_V4_NET
+
+
+def _is_fake_ip_v6(ip_str: str) -> bool:
+    """Return True if ``ip_str`` is an IPv6 address in the Sing-box/Surge Fake-IPv6 prefix."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return isinstance(ip, ipaddress.IPv6Address) and ip in _FAKE_IP_V6_NET
+
+
+def _parse_literal_ip(
+    hostname: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, bool] | None:
+    """Parse canonical or obfuscated literal IP addresses.
+
+    Returns ``(ip_address, is_obfuscated_ipv4)`` if ``hostname`` is an IP literal,
+    or ``None`` if it is a regular domain name.
+    """
+    try:
+        return ipaddress.ip_address(hostname), False
+    except ValueError:
+        pass
+
+    try:
+        packed = socket.inet_aton(hostname)
+    except OSError:
+        return None
+
+    ip = ipaddress.IPv4Address(packed)
+    return ip, str(ip) != hostname
+
+
+def _normalize_hostname(raw_hostname: str) -> str:
+    """Normalize a non-IPv6 hostname via IDNA or validate an IPv6 literal."""
+    cleaned = raw_hostname.strip()
+    if not cleaned:
+        raise ProxyError(400, "URL must include a valid hostname")
+
+    if ":" in cleaned:
+        try:
+            ipaddress.ip_address(cleaned)
+        except ValueError as exc:
+            raise ProxyError(400, f"Invalid IPv6 hostname: '{cleaned}'") from exc
+        return cleaned.lower()
+
+    try:
+        ascii_host = cleaned.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ProxyError(400, f"Invalid IDNA hostname: '{cleaned}'") from exc
+
+    normalized = ascii_host.strip().lower().rstrip(".")
+    if not normalized:
+        raise ProxyError(400, "URL must include a valid hostname")
+    return normalized
+
+
+def _resolve_canary_ips(domain: str) -> list[str]:
+    """Resolve a trusted canary domain via system DNS."""
+    infos = socket.getaddrinfo(domain, 443, type=socket.SOCK_STREAM)
+    ips: list[str] = []
+    for info in infos:
+        sockaddr = info[4]
+        if sockaddr:
+            ip_str = str(sockaddr[0])
+            if ip_str not in ips:
+                ips.append(ip_str)
+    return ips
+
+
+def reset_dns_canary_caches() -> None:
+    """Clear cached Fake-IP and local DNS canary probe results."""
+    global _fake_ip_canary_cache, _local_dns_canary_cache
+    _fake_ip_canary_cache = None
+    _local_dns_canary_cache = None
+
+
+def _is_system_fake_ip_dns_active() -> bool:
+    """Return True if trusted canary domains resolve to RFC 2544 Fake-IP (198.18.0.0/15).
+
+    Cached for 60s; fails closed (False) on DNS resolution errors.
+    """
+    global _fake_ip_canary_cache
+    now = time.monotonic()
+    if (
+        _fake_ip_canary_cache is not None
+        and (now - _fake_ip_canary_cache[0]) < _FAKE_IP_CANARY_TTL_SECONDS
+    ):
+        return _fake_ip_canary_cache[1]
+
+    active = False
+    for domain in _FAKE_IP_CANARY_DOMAINS:
+        try:
+            ips = _resolve_canary_ips(domain)
+        except OSError:
+            continue
+        if ips and any(_is_fake_ip_v4(ip) for ip in ips):
+            active = True
+            break
+
+    _fake_ip_canary_cache = (now, active)
+    return active
+
+
+def _is_local_dns_available() -> bool:
+    """Return True if local system DNS can resolve at least one trusted canary domain."""
+    global _local_dns_canary_cache
+    now = time.monotonic()
+    if (
+        _local_dns_canary_cache is not None
+        and (now - _local_dns_canary_cache[0]) < _FAKE_IP_CANARY_TTL_SECONDS
+    ):
+        return _local_dns_canary_cache[1]
+
+    available = False
+    for domain in _FAKE_IP_CANARY_DOMAINS:
+        try:
+            ips = _resolve_canary_ips(domain)
+        except OSError:
+            continue
+        if ips:
+            available = True
+            break
+
+    _local_dns_canary_cache = (now, available)
+    return available
+
+
 def resolve_host_ips(hostname: str, port: int) -> list[str]:
     """Resolve a hostname to a deduplicated list of IP address strings."""
     try:
@@ -254,51 +428,128 @@ def resolve_host_ips(hostname: str, port: int) -> list[str]:
     return ips
 
 
-def validate_public_http_url(url: str) -> str:
-    """Validate URL scheme and reject localhost, private, loopback, link-local, or reserved IPs."""
+def validate_public_http_url(
+    url: str,
+    *,
+    fake_ip_policy: FakeIPPolicy | None = None,
+    settings: Settings | None = None,
+) -> str:
+    """Validate URL scheme and reject localhost, private, loopback, link-local, or reserved IPs.
+
+    Supports gated acceptance of DNS-resolved Surge/Sing-box Fake-IPs (198.18.0.0/15, and
+    paired fc00::/18 only when 198.18.0.0/15 is also present) on ports 80/443, while keeping
+    all literal IPs and internal/rebinding hostnames unconditionally blocked.
+    """
     raw = url.strip()
     if not raw:
         raise ProxyError(400, "URL is required")
 
-    parsed = urlparse(raw)
-    if parsed.scheme.lower() not in ("http", "https"):
+    try:
+        parsed = urlparse(raw)
+    except ValueError as exc:
+        raise ProxyError(400, f"Malformed URL: {exc}") from exc
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
         raise ProxyError(400, f"Unsupported URL scheme: {parsed.scheme or 'none'}")
 
     if parsed.username is not None or parsed.password is not None:
         raise ProxyError(400, "Credentials in URL are not allowed")
 
-    hostname = (parsed.hostname or "").strip().lower().rstrip(".")
-    if not hostname:
-        raise ProxyError(400, "URL must include a valid hostname")
+    try:
+        port = parsed.port or (443 if scheme == "https" else 80)
+    except ValueError as exc:
+        raise ProxyError(400, f"Invalid port in URL: {exc}") from exc
+
+    # Layer 1: unconditional pre-DNS hostname & literal IP checks
+    hostname = _normalize_hostname(parsed.hostname or "")
+
+    parsed_literal = _parse_literal_ip(hostname)
+    if parsed_literal is not None:
+        literal_ip, is_obfuscated = parsed_literal
+        if is_obfuscated or _is_ip_blocked(str(literal_ip)):
+            raise ProxyError(
+                403,
+                f"Access to non-public or obfuscated IP '{hostname}' is forbidden",
+            )
+        return raw
 
     if (
         hostname in BLOCKED_HOSTNAMES
-        or hostname.endswith(".localhost")
-        or hostname.endswith(".local")
-        or hostname.endswith(".internal")
+        or any(hostname.endswith(suffix) for suffix in BLOCKED_HOSTNAME_SUFFIXES)
+        or any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in BLOCKED_REBINDING_DOMAINS
+        )
     ):
-        raise ProxyError(403, f"Access to internal host '{hostname}' is forbidden")
+        raise ProxyError(403, f"Access to internal or blocked host '{hostname}' is forbidden")
 
-    # Fast-path check for literal IP addresses (works offline without DNS)
+    if "." not in hostname:
+        raise ProxyError(403, f"Access to single-label internal host '{hostname}' is forbidden")
+
+    def _effective_policy_and_settings() -> tuple[FakeIPPolicy, Settings | None]:
+        if fake_ip_policy is not None:
+            return fake_ip_policy, settings
+        resolved_settings = settings if settings is not None else get_settings()
+        return resolved_settings.rss_allow_fake_ip_dns, resolved_settings
+
+    # Layer 2: DNS resolution with gated Fake-IP acceptance and proxy-only DNS fallback
     try:
-        literal_ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        literal_ip = None
+        resolved_ips = resolve_host_ips(hostname, port)
+    except ProxyError as exc:
+        if exc.status_code == 400:
+            policy, effective_settings = _effective_policy_and_settings()
+            if (
+                policy != "never"
+                and port in (80, 443)
+                and has_active_proxy_for_url(raw, settings=effective_settings)
+                and not _is_local_dns_available()
+            ):
+                return raw
+        raise
 
-    if literal_ip is not None:
-        if _is_ip_blocked(str(literal_ip)):
-            raise ProxyError(403, f"Access to non-public IP '{hostname}' is forbidden")
+    if not any(_is_ip_blocked(ip_str) for ip_str in resolved_ips):
         return raw
 
-    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
-    resolved_ips = resolve_host_ips(hostname, port)
+    has_fake_v4 = any(_is_fake_ip_v4(ip_str) for ip_str in resolved_ips)
     for ip_str in resolved_ips:
-        if _is_ip_blocked(ip_str):
-            raise ProxyError(
-                403,
-                f"Hostname '{hostname}' resolved to non-public IP '{ip_str}'",
-            )
-    return raw
+        if not _is_ip_blocked(ip_str):
+            continue
+        if _is_fake_ip_v4(ip_str):
+            continue
+        if has_fake_v4 and _is_fake_ip_v6(ip_str):
+            continue
+        raise ProxyError(
+            403,
+            f"Hostname '{hostname}' resolved to non-public IP '{ip_str}'",
+        )
+
+    if port not in (80, 443):
+        raise ProxyError(
+            403,
+            f"Hostname '{hostname}' resolved to Fake-IP on disallowed port {port}",
+        )
+
+    policy, effective_settings = _effective_policy_and_settings()
+    if policy == "never":
+        raise ProxyError(
+            403,
+            f"Hostname '{hostname}' resolved to Fake-IP while RSS_ALLOW_FAKE_IP_DNS=never",
+        )
+    if policy == "always":
+        return raw
+
+    if (
+        has_active_proxy_for_url(raw, settings=effective_settings)
+        or _is_system_fake_ip_dns_active()
+    ):
+        return raw
+
+    raise ProxyError(
+        403,
+        f"Hostname '{hostname}' resolved to non-public Fake-IP without an active proxy "
+        "or Fake-IP DNS",
+    )
 
 
 async def fetch_proxied_image(
@@ -310,78 +561,70 @@ async def fetch_proxied_image(
     """Fetch a remote image safely with SSRF validation on every redirect hop."""
     current_url = validate_public_http_url(url)
 
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False)
-        if client is None
-        else client
-    )
+    async with managed_async_client(client, follow_redirects=False) as http_client:
+        try:
+            for hop in range(MAX_REDIRECTS + 1):
+                parsed = urlparse(current_url)
+                headers = {
+                    "User-Agent": BROWSER_USER_AGENT,
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": f"{parsed.scheme}://{parsed.netloc}/",
+                }
+                async with http_client.stream(
+                    "GET",
+                    current_url,
+                    headers=headers,
+                    follow_redirects=False,
+                ) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ProxyError(502, "Upstream redirect missing Location header")
+                        if hop == MAX_REDIRECTS:
+                            break
+                        current_url = validate_public_http_url(urljoin(current_url, location))
+                        continue
 
-    try:
-        for _ in range(MAX_REDIRECTS + 1):
-            validate_public_http_url(current_url)
-            parsed = urlparse(current_url)
-            headers = {
-                "User-Agent": BROWSER_USER_AGENT,
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                "Referer": f"{parsed.scheme}://{parsed.netloc}/",
-            }
-            async with http_client.stream(
-                "GET",
-                current_url,
-                headers=headers,
-                follow_redirects=False,
-            ) as response:
-                if response.status_code in (301, 302, 303, 307, 308):
-                    location = response.headers.get("location")
-                    if not location:
-                        raise ProxyError(502, "Upstream redirect missing Location header")
-                    current_url = urljoin(current_url, location)
-                    continue
+                    if response.status_code >= 400:
+                        raise ProxyError(
+                            502,
+                            f"Upstream image server returned HTTP {response.status_code}",
+                        )
 
-                if response.status_code >= 400:
-                    raise ProxyError(
-                        502,
-                        f"Upstream image server returned HTTP {response.status_code}",
-                    )
+                    raw_ct = response.headers.get("content-type", "")
+                    content_type = raw_ct.split(";", 1)[0].strip().lower()
+                    if not content_type.startswith("image/"):
+                        ct_label = content_type or "none"
+                        raise ProxyError(
+                            400,
+                            f"Upstream resource is not an image (content-type: {ct_label})",
+                        )
 
-                raw_ct = response.headers.get("content-type", "")
-                content_type = raw_ct.split(";", 1)[0].strip().lower()
-                if not content_type.startswith("image/"):
-                    ct_label = content_type or "none"
-                    raise ProxyError(
-                        400,
-                        f"Upstream resource is not an image (content-type: {ct_label})",
-                    )
+                    content_length_hdr = response.headers.get("content-length")
+                    if content_length_hdr:
+                        try:
+                            if int(content_length_hdr) > max_bytes:
+                                raise ProxyError(
+                                    413,
+                                    f"Image exceeds maximum allowed size of {max_bytes} bytes",
+                                )
+                        except ValueError:
+                            pass
 
-                content_length_hdr = response.headers.get("content-length")
-                if content_length_hdr:
-                    try:
-                        if int(content_length_hdr) > max_bytes:
+                    buf = bytearray()
+                    async for chunk in response.aiter_bytes(chunk_size=65536):
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
                             raise ProxyError(
                                 413,
                                 f"Image exceeds maximum allowed size of {max_bytes} bytes",
                             )
-                    except ValueError:
-                        pass
 
-                buf = bytearray()
-                async for chunk in response.aiter_bytes(chunk_size=65536):
-                    buf.extend(chunk)
-                    if len(buf) > max_bytes:
-                        raise ProxyError(
-                            413,
-                            f"Image exceeds maximum allowed size of {max_bytes} bytes",
-                        )
+                    return bytes(buf), content_type
 
-                return bytes(buf), content_type
-
-        raise ProxyError(400, "Too many redirects while fetching image")
-    except httpx.HTTPError as exc:
-        raise ProxyError(502, f"Failed to fetch upstream image: {exc}") from exc
-    finally:
-        if owns_client:
-            await http_client.aclose()
+            raise ProxyError(400, "Too many redirects while fetching image")
+        except httpx.HTTPError as exc:
+            raise ProxyError(502, f"Failed to fetch upstream image: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -505,51 +748,43 @@ async def resolve_youtube_feed_url(
         )
 
     # Case 3: @handle, /c/..., /user/... -> safely fetch YouTube channel page HTML
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False)
-        if client is None
-        else client
-    )
     page_html: str | None = None
     current_url = target_url
-    try:
-        for _ in range(MAX_REDIRECTS + 1):
-            if not _is_allowed_youtube_redirect_url(current_url):
-                raise ValueError(
-                    f"Refusing to follow non-YouTube redirect target '{current_url}'"
+    async with managed_async_client(client, follow_redirects=False) as http_client:
+        try:
+            for _ in range(MAX_REDIRECTS + 1):
+                if not _is_allowed_youtube_redirect_url(current_url):
+                    raise ValueError(
+                        f"Refusing to follow non-YouTube redirect target '{current_url}'"
+                    )
+                try:
+                    validate_public_http_url(current_url)
+                except ProxyError as exc:
+                    raise ValueError(
+                        f"Blocked unsafe YouTube resolution target: {exc.detail}"
+                    ) from exc
+
+                response = await http_client.get(
+                    current_url,
+                    headers={
+                        "User-Agent": BROWSER_USER_AGENT,
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+417",
+                    },
+                    follow_redirects=False,
                 )
-            try:
-                validate_public_http_url(current_url)
-            except ProxyError as exc:
-                raise ValueError(
-                    f"Blocked unsafe YouTube resolution target: {exc.detail}"
-                ) from exc
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("location")
+                    if not location:
+                        raise ValueError("YouTube redirect response missing Location header")
+                    current_url = urljoin(current_url, location)
+                    continue
 
-            response = await http_client.get(
-                current_url,
-                headers={
-                    "User-Agent": BROWSER_USER_AGENT,
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+417",
-                },
-                follow_redirects=False,
-            )
-            if response.status_code in (301, 302, 303, 307, 308):
-                location = response.headers.get("location")
-                if not location:
-                    raise ValueError("YouTube redirect response missing Location header")
-                current_url = urljoin(current_url, location)
-                continue
-
-            response.raise_for_status()
-            page_html = response.text
-            break
-    except httpx.HTTPError as exc:
-        raise ValueError(f"Failed to fetch YouTube channel page '{target_url}': {exc}") from exc
-    finally:
-        if owns_client:
-            await http_client.aclose()
+                response.raise_for_status()
+                page_html = response.text
+                break
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Failed to fetch YouTube channel page '{target_url}': {exc}") from exc
 
     if page_html is None:
         raise ValueError(f"Too many redirects while resolving YouTube channel '{target_url}'")
@@ -684,13 +919,7 @@ async def discover_podcasts(
     if not term:
         return []
 
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True)
-        if client is None
-        else client
-    )
-    try:
+    async with managed_async_client(client, follow_redirects=True) as http_client:
         response = await http_client.get(
             "https://itunes.apple.com/search",
             params={
@@ -699,13 +928,10 @@ async def discover_podcasts(
                 "entity": "podcast",
                 "limit": 10,
             },
-            headers={"User-Agent": USER_AGENT},
+            headers={"User-Agent": API_USER_AGENT},
         )
         response.raise_for_status()
         payload = response.json()
-    finally:
-        if owns_client:
-            await http_client.aclose()
 
     results: list[PodcastSearchResult] = []
     for item in payload.get("results") or []:
@@ -876,28 +1102,13 @@ async def fetch_rss_feed(
     client: httpx.AsyncClient | None = None,
 ) -> tuple[int, int]:
     """Fetch a standard RSS/Atom/YouTube/Podcast feed over HTTP and persist entries."""
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True)
-        if client is None
-        else client
-    )
-    try:
-        response = await http_client.get(
-            feed.url,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept": (
-                    "application/rss+xml, application/atom+xml, "
-                    "application/xml, text/xml;q=0.9, */*;q=0.8"
-                ),
-            },
-        )
+    async with managed_async_client(client, follow_redirects=True) as http_client:
+        response = await http_client.get(feed.url, headers=FEED_HEADERS)
+        if response.status_code in (403, 406, 429):
+            fallback_headers = {**FEED_HEADERS, "User-Agent": FALLBACK_FEED_USER_AGENT}
+            response = await http_client.get(feed.url, headers=fallback_headers)
         response.raise_for_status()
         xml_text = response.text
-    finally:
-        if owns_client:
-            await http_client.aclose()
 
     return parse_rss_xml_into_db(db=db, feed=feed, xml_text=xml_text)
 
@@ -943,19 +1154,10 @@ async def fetch_hn_algolia_feed(
         f"?tags=story&numericFilters=points>={min_points}&hitsPerPage=50"
     )
 
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True)
-        if client is None
-        else client
-    )
-    try:
-        response = await http_client.get(api_url, headers={"User-Agent": USER_AGENT})
+    async with managed_async_client(client, follow_redirects=True) as http_client:
+        response = await http_client.get(api_url, headers={"User-Agent": API_USER_AGENT})
         response.raise_for_status()
         payload = response.json()
-    finally:
-        if owns_client:
-            await http_client.aclose()
 
     hits = payload.get("hits") or []
     rules = db.list_filter_rules()
@@ -1066,19 +1268,10 @@ async def fetch_hn_comments(
 ) -> list[HNComment]:
     """Fetch nested top comments for a Hacker News item via Algolia Items API."""
     api_url = f"https://hn.algolia.com/api/v1/items/{hn_item_id}"
-    owns_client = client is None
-    http_client = (
-        httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True)
-        if client is None
-        else client
-    )
-    try:
-        response = await http_client.get(api_url, headers={"User-Agent": USER_AGENT})
+    async with managed_async_client(client, follow_redirects=True) as http_client:
+        response = await http_client.get(api_url, headers={"User-Agent": API_USER_AGENT})
         response.raise_for_status()
         payload = response.json()
-    finally:
-        if owns_client:
-            await http_client.aclose()
 
     raw_children = payload.get("children") or []
     if not isinstance(raw_children, list):
@@ -1128,29 +1321,19 @@ async def extract_entry_full_text(
 
     try:
         current_url = validate_public_http_url(entry.url)
-        owns_client = client is None
-        http_client = (
-            httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=False)
-            if client is None
-            else client
-        )
-        try:
+        async with managed_async_client(client, follow_redirects=False) as http_client:
             response: httpx.Response | None = None
-            for _ in range(MAX_REDIRECTS + 1):
-                validate_public_http_url(current_url)
+            for hop in range(MAX_REDIRECTS + 1):
                 resp = await http_client.get(
                     current_url,
-                    headers={
-                        "User-Agent": BROWSER_USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    },
+                    headers=HTML_HEADERS,
                     follow_redirects=False,
                 )
                 if resp.status_code in (301, 302, 303, 307, 308):
                     location = resp.headers.get("location")
-                    if not location:
+                    if not location or hop == MAX_REDIRECTS:
                         break
-                    current_url = urljoin(current_url, location)
+                    current_url = validate_public_http_url(urljoin(current_url, location))
                     continue
                 response = resp
                 break
@@ -1170,9 +1353,6 @@ async def extract_entry_full_text(
                     include_comments=False,
                     include_tables=True,
                 )
-        finally:
-            if owns_client:
-                await http_client.aclose()
     except ProxyError as exc:
         failure_note = f"Extraction skipped for safety: {exc.detail}"
     except Exception as exc:
